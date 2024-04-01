@@ -27,7 +27,7 @@
 #include <string.h>
 #include <sys/param.h> // MIN and MAX
 
-#include "bsp/board.h"
+#include "bsp/board_api.h"
 #include "tusb.h"
 #include "usb_descriptors.h"
 #include "i2s_audio.h"
@@ -123,6 +123,13 @@ int main(void)
   gpio_set_dir(LED_B, GPIO_OUT);
   gpio_put(LED_B, 1);
 */
+
+  /* HACK: To allow testing on a basic Pico with a button on Pin 12
+  gpio_init(PICO_UNICORN_A);
+  gpio_set_function(PICO_UNICORN_A, GPIO_FUNC_SIO);
+  gpio_set_dir(PICO_UNICORN_A, GPIO_IN);
+  gpio_pull_up(PICO_UNICORN_A);
+  */
 
   system_init();
 
@@ -440,6 +447,19 @@ void audio_task(void)
     if(get_mute_button_pressed()) {
       mute[0] = !mute[0];
       mute[1] = !mute[1];
+
+      // Mute was changed
+      // 6.1 Interrupt Data Message
+      const audio_interrupt_data_t data = {
+        .bInfo = 0,                                       // Class-specific interrupt, originated from an interface
+        .bAttribute = AUDIO_CS_REQ_CUR,                   // Caused by current settings
+        .wValue_cn_or_mcn = 0,                            // CH0: master volume
+        .wValue_cs = AUDIO_FU_CTRL_MUTE,                  // Muted/Unmuted
+        .wIndex_ep_or_int = 0,                            // From the interface itself
+        .wIndex_entity_id = UAC2_ENTITY_SPK_FEATURE_UNIT, // From feature unit
+      };
+
+      tud_audio_int_write(&data);
     }
     /*if(volume_delta > 0) {
       system_led(0, 255, 0);
@@ -459,11 +479,32 @@ void audio_task(void)
         system_volume += volume_delta;
     }
 
+    /* HACK: To allow testing on a basic Pico with a button on Pin 12
+    if(!gpio_get(PICO_UNICORN_A)) {
+      system_volume ++;
+      system_volume %= 255;
+      volume_delta = 1;
+    }
+    */
+
     if(volume_delta != 0) {
       system_led(0, system_volume, 0);
 
       volume[0] = system_volume * 100;
       volume[1] = system_volume * 100;
+
+      // Volume has changed
+      // 6.1 Interrupt Data Message
+      const audio_interrupt_data_t data = {
+        .bInfo = 0,                                       // Class-specific interrupt, originated from an interface
+        .bAttribute = AUDIO_CS_REQ_CUR,                   // Caused by current settings
+        .wValue_cn_or_mcn = 0,                            // CH0: master volume
+        .wValue_cs = AUDIO_FU_CTRL_VOLUME,                // Volume change
+        .wIndex_ep_or_int = 0,                            // From the interface itself
+        .wIndex_entity_id = UAC2_ENTITY_SPK_FEATURE_UNIT, // From feature unit
+      };
+
+      tud_audio_int_write(&data);
     }
 
     start_ms += volume_interval_ms;

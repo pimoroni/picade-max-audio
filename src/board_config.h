@@ -17,6 +17,10 @@ static const int BUTTON = 27;
 static const uint ENC_A = 28;
 static const uint ENC_B = 29;
 
+/* HACK: To allow testing on a basic Pico with a button on Pin 12
+static const uint8_t PICO_UNICORN_A = 12;
+*/
+
 #define PICO_AUDIO_I2S_AMP_ENABLE AMP_EN
 
 enum
