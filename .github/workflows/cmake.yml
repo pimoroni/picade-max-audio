@@ -50,6 +50,12 @@ jobs:
         path: pico-sdk
         submodules: true
 
+    - name: TESTING Mangle Pico SDK's TinyUSB submodule
+      run: |
+        cd pico-sdk/lib/tinyusb
+        git fetch origin master:master
+        git checkout master
+
     # Checkout Pico Extras
     - name: Checkout Pico Extras
       uses: actions/checkout@v3
