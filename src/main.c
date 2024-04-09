@@ -435,80 +435,7 @@ bool tud_audio_tx_done_pre_load_cb(uint8_t rhport, uint8_t itf, uint8_t ep_in, u
 void audio_task(void)
 {
   static uint32_t start_ms = 0;
-  uint32_t volume_interval_ms = 10;
-
-  if (board_millis() - start_ms >= volume_interval_ms)
-  {
-    int32_t volume_delta = get_volume_delta();
-
-    // Long press triggers reset to bootloader
-    handle_mute_button_held();
-
-    if(get_mute_button_pressed()) {
-      mute[0] = !mute[0];
-      mute[1] = !mute[1];
-
-      // Mute was changed
-      // 6.1 Interrupt Data Message
-      const audio_interrupt_data_t data = {
-        .bInfo = 0,                                       // Class-specific interrupt, originated from an interface
-        .bAttribute = AUDIO_CS_REQ_CUR,                   // Caused by current settings
-        .wValue_cn_or_mcn = 0,                            // CH0: master volume
-        .wValue_cs = AUDIO_FU_CTRL_MUTE,                  // Muted/Unmuted
-        .wIndex_ep_or_int = 0,                            // From the interface itself
-        .wIndex_entity_id = UAC2_ENTITY_SPK_FEATURE_UNIT, // From feature unit
-      };
-
-      tud_audio_int_write(&data);
-    }
-    /*if(volume_delta > 0) {
-      system_led(0, 255, 0);
-    } else if (volume_delta < 0) {
-      system_led(0, 0, 255);
-    } else {
-      system_led(0, 0, 0);
-    }*/
-
-    volume_delta *= volume_speed;
-
-    if(volume_delta + system_volume > 255) {
-        system_volume = 255;
-    } else if (volume_delta + system_volume < 0) {
-        system_volume = 0;
-    } else {
-        system_volume += volume_delta;
-    }
-
-    /* HACK: To allow testing on a basic Pico with a button on Pin 12
-    if(!gpio_get(PICO_UNICORN_A)) {
-      system_volume ++;
-      system_volume %= 255;
-      volume_delta = 1;
-    }
-    */
-
-    if(volume_delta != 0) {
-      system_led(0, system_volume, 0);
-
-      volume[0] = system_volume * 100;
-      volume[1] = system_volume * 100;
-
-      // Volume has changed
-      // 6.1 Interrupt Data Message
-      const audio_interrupt_data_t data = {
-        .bInfo = 0,                                       // Class-specific interrupt, originated from an interface
-        .bAttribute = AUDIO_CS_REQ_CUR,                   // Caused by current settings
-        .wValue_cn_or_mcn = 0,                            // CH0: master volume
-        .wValue_cs = AUDIO_FU_CTRL_VOLUME,                // Volume change
-        .wIndex_ep_or_int = 0,                            // From the interface itself
-        .wIndex_entity_id = UAC2_ENTITY_SPK_FEATURE_UNIT, // From feature unit
-      };
-
-      tud_audio_int_write(&data);
-    }
-
-    start_ms += volume_interval_ms;
-  }
+  uint32_t volume_interval_ms = 50;
 
   // When new data arrived, copy data from speaker buffer, to microphone buffer
   // and send it over
@@ -536,6 +463,82 @@ void audio_task(void)
 
     i2s_audio_give_buffer(spk_buf, (size_t)spk_data_size, current_resolution, current_volume);
     spk_data_size = 0;
+  }
+
+  if (board_millis() - start_ms >= volume_interval_ms)
+  {
+    int32_t volume_delta = get_volume_delta();
+
+    // Long press triggers reset to bootloader
+    handle_mute_button_held();
+
+    if(get_mute_button_pressed()) {
+      mute[0] = !mute[0];
+      mute[1] = !mute[1];
+
+      // Mute was changed
+      // 6.1 Interrupt Data Message
+      const audio_interrupt_data_t data = {
+        .bInfo = 0,                                       // Class-specific interrupt, originated from an interface
+        .bAttribute = AUDIO_CS_REQ_CUR,                   // Caused by current settings
+        .wValue_cn_or_mcn = 0,                            // CH0: master volume
+        .wValue_cs = AUDIO_FU_CTRL_MUTE,                  // Muted/Unmuted
+        .wIndex_ep_or_int = 0,                            // From the interface itself
+        .wIndex_entity_id = UAC2_ENTITY_SPK_FEATURE_UNIT, // From feature unit
+      };
+
+      tud_audio_int_write(&data);
+      tud_task();
+    }
+    /*if(volume_delta > 0) {
+      system_led(0, 255, 0);
+    } else if (volume_delta < 0) {
+      system_led(0, 0, 255);
+    } else {
+      system_led(0, 0, 0);
+    }*/
+
+    volume_delta *= volume_speed;
+
+    int old_system_volume = system_volume;
+
+    if(volume_delta + system_volume > 255) {
+        system_volume = 255;
+    } else if (volume_delta + system_volume < 0) {
+        system_volume = 0;
+    } else {
+        system_volume += volume_delta;
+    }
+
+    /* HACK: To allow testing on a basic Pico with a button on Pin 12
+    if(!gpio_get(PICO_UNICORN_A)) {
+      system_volume ++;
+      system_volume %= 255;
+      volume_delta = 1;
+    }
+    */
+
+    if(system_volume != old_system_volume) {
+      system_led(0, system_volume, 0);
+
+      volume[0] = system_volume * 100;
+      volume[1] = system_volume * 100;
+
+      // Volume has changed
+      // 6.1 Interrupt Data Message
+      const audio_interrupt_data_t data = {
+        .bInfo = 0,                                       // Class-specific interrupt, originated from an interface
+        .bAttribute = AUDIO_CS_REQ_CUR,                   // Caused by current settings
+        .wValue_cn_or_mcn = 0,                            // CH0: master volume
+        .wValue_cs = AUDIO_FU_CTRL_VOLUME,                // Volume change
+        .wIndex_ep_or_int = 0,                            // From the interface itself
+        .wIndex_entity_id = UAC2_ENTITY_SPK_FEATURE_UNIT, // From feature unit
+      };
+
+      tud_audio_int_write(&data);
+    }
+
+    start_ms += volume_interval_ms;
   }
 }
 

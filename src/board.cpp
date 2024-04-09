@@ -7,6 +7,7 @@
 #include "hardware/structs/rosc.h"
 #include "hardware/watchdog.h"
 #include "hardware/sync.h"
+#include "hardware/vreg.h"
 
 using namespace encoder;
 using namespace pimoroni;
@@ -20,6 +21,12 @@ absolute_time_t pressed_time;
 
 extern "C" {
     void system_init() {
+        // Apply a modest overvolt, default is 1.10v.
+        // this is required for a stable 250MHz on some RP2040s
+        vreg_set_voltage(VREG_VOLTAGE_1_20);
+        sleep_ms(10);
+        set_sys_clock_khz(250000, true);
+
         // DCDC PSM control
         // 0: PFM mode (best efficiency)
         // 1: PWM mode (improved ripple)
