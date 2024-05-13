@@ -31,20 +31,20 @@ jobs:
 
     steps:
     - name: Checkout Code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         path: project
 
     # Checkout the Pimoroni Pico Libraries
     - name: Checkout Pimoroni Pico Libraries
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         repository: pimoroni/pimoroni-pico
         path: pimoroni-pico
 
     # Checkout the Pico SDK
     - name: Checkout Pico SDK
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         repository: raspberrypi/pico-sdk
         path: pico-sdk
@@ -58,7 +58,7 @@ jobs:
 
     # Checkout Pico Extras
     - name: Checkout Pico Extras
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         repository: raspberrypi/pico-extras
         path: pico-extras
@@ -93,7 +93,7 @@ jobs:
 
     - name: Upload Artifact
       if: github.event_name != 'release'
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ${{env.RELEASE_FILE}}
         path: ${{runner.workspace}}/build/install
