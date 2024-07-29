@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.12)
 
-set(NAME tinyusb-i2s-audio)
+set(NAME picade-max-audio)
 set(FAMILY rp2040)
 set(BOARD pico_sdk)
 
