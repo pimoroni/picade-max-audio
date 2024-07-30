@@ -435,7 +435,7 @@ bool tud_audio_tx_done_pre_load_cb(uint8_t rhport, uint8_t itf, uint8_t ep_in, u
 void audio_task(void)
 {
   static uint32_t start_ms = 0;
-  uint32_t volume_interval_ms = 50;
+  uint32_t volume_interval_ms = 10;
 
   // When new data arrived, copy data from speaker buffer, to microphone buffer
   // and send it over
