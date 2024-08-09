@@ -5,6 +5,7 @@
 
 #include "pico/bootrom.h"
 #include "hardware/structs/rosc.h"
+#include "hardware/clocks.h"
 #include "hardware/watchdog.h"
 #include "hardware/sync.h"
 #include "hardware/vreg.h"
