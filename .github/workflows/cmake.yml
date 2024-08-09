@@ -48,13 +48,8 @@ jobs:
       with:
         repository: raspberrypi/pico-sdk
         path: pico-sdk
+        ref: 2.0.0
         submodules: true
-
-    - name: TESTING Mangle Pico SDK's TinyUSB submodule
-      run: |
-        cd pico-sdk/lib/tinyusb
-        git fetch origin master:master
-        git checkout master
 
     # Checkout Pico Extras
     - name: Checkout Pico Extras
@@ -62,6 +57,7 @@ jobs:
       with:
         repository: raspberrypi/pico-extras
         path: pico-extras
+        ref: sdk-2.0.0
         submodules: true
 
     # Linux deps
