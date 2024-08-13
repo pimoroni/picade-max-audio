@@ -75,38 +75,10 @@ void usb_serial_init(void) {
 //--------------------------------------------------------------------+
 #define CONFIG_TOTAL_LEN    	(TUD_CONFIG_DESC_LEN + CFG_TUD_AUDIO * TUD_AUDIO_HEADSET_STEREO_DESC_LEN)
 
-#if CFG_TUSB_MCU == OPT_MCU_LPC175X_6X || CFG_TUSB_MCU == OPT_MCU_LPC177X_8X || CFG_TUSB_MCU == OPT_MCU_LPC40XX
-  // LPC 17xx and 40xx endpoint type (bulk/interrupt/iso) are fixed by its number
-  // 0 control, 1 In, 2 Bulk, 3 Iso, 4 In etc ...
-  #define EPNUM_AUDIO_IN    0x03
-  #define EPNUM_AUDIO_OUT   0x03
-  #define EPNUM_AUDIO_INT   0x01
+#define EPNUM_AUDIO_IN    0x01
+#define EPNUM_AUDIO_OUT   0x01
+#define EPNUM_AUDIO_INT   0x02
 
-#elif CFG_TUSB_MCU == OPT_MCU_NRF5X
-  // ISO endpoints for NRF5x are fixed to 0x08 (0x88)
-  #define EPNUM_AUDIO_IN    0x08
-  #define EPNUM_AUDIO_OUT   0x08
-  #define EPNUM_AUDIO_INT   0x01
-
-#elif CFG_TUSB_MCU == OPT_MCU_SAMG  || CFG_TUSB_MCU ==  OPT_MCU_SAMX7X
-  // SAMG & SAME70 don't support a same endpoint number with different direction IN and OUT
-  //    e.g EP1 OUT & EP1 IN cannot exist together
-  #define EPNUM_AUDIO_IN    0x01
-  #define EPNUM_AUDIO_OUT   0x02
-  #define EPNUM_AUDIO_INT   0x03
-
-#elif CFG_TUSB_MCU == OPT_MCU_FT90X || CFG_TUSB_MCU == OPT_MCU_FT93X
-  // FT9XX doesn't support a same endpoint number with different direction IN and OUT
-  //    e.g EP1 OUT & EP1 IN cannot exist together
-  #define EPNUM_AUDIO_IN    0x01
-  #define EPNUM_AUDIO_OUT   0x02
-  #define EPNUM_AUDIO_INT   0x03
-
-#else
-  #define EPNUM_AUDIO_IN    0x01
-  #define EPNUM_AUDIO_OUT   0x01
-  #define EPNUM_AUDIO_INT   0x02
-#endif
 
 uint8_t const desc_configuration[] =
 {
@@ -140,7 +112,7 @@ char const* string_desc_arr [] =
   "Speakers",                     // 4: Audio Interface
 };
 
-static uint16_t _desc_str[32];
+static uint16_t _desc_str[32 + 1];
 
 // Invoked when received GET STRING DESCRIPTOR request
 // Application return pointer to descriptor, whose contents must exist long enough for transfer to complete
@@ -158,23 +130,23 @@ uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid)
   else
   {
     // Convert ASCII string into UTF-16
+    if ( !(index < sizeof(string_desc_arr) / sizeof(string_desc_arr[0])) ) return NULL;
 
-    if (!(index < sizeof(string_desc_arr)/sizeof(string_desc_arr[0]))) return NULL;
-
-    const char* str = string_desc_arr[index];
+    const char *str = string_desc_arr[index];
 
     // Cap at max char
-    chr_count = (uint8_t) strlen(str);
-    if (chr_count > 31) chr_count = 31;
+    chr_count = strlen(str);
+    size_t const max_count = sizeof(_desc_str) / sizeof(_desc_str[0]) - 1; // -1 for string type
+    if ( chr_count > max_count ) chr_count = max_count;
 
-    for (uint8_t i = 0; i < chr_count; i++)
-    {
+    // Convert ASCII string into UTF-16
+    for ( size_t i = 0; i < chr_count; i++ ) {
       _desc_str[1 + i] = str[i];
     }
   }
 
   // first byte is length (including header), second byte is string type
-  _desc_str[0] = (uint16_t) ((TUSB_DESC_STRING << 8 ) | (2*chr_count + 2));
+  _desc_str[0] = (uint16_t) ((TUSB_DESC_STRING << 8) | (2 * chr_count + 2));
 
   return _desc_str;
 }
