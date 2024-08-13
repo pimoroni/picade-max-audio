@@ -25,6 +25,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <string_view>
 #include <sys/param.h> // MIN and MAX
 
 #include "bsp/board_api.h"
@@ -33,6 +34,13 @@
 #include "i2s_audio.h"
 #include "board_config.h"
 #include "board.h"
+
+#include "hardware/clocks.h"
+#include "hardware/vreg.h"
+#include "pico/bootrom.h"
+#include "hardware/structs/rosc.h"
+#include "hardware/watchdog.h"
+#include "pico/timeout_helper.h"
 
 // Approximate exponential volume ramp - (n / 64) ^ 4
 // Tested with pure square for perceptual loudness.
@@ -99,9 +107,96 @@ const uint8_t resolutions_per_format[CFG_TUD_AUDIO_FUNC_1_N_FORMATS] = {CFG_TUD_
 // Current resolution, update on format change
 uint8_t current_resolution;
 
+
+const size_t MAX_UART_PACKET = 64;
+
+const size_t COMMAND_LEN = 4;
+uint8_t command_buffer[COMMAND_LEN];
+std::string_view command((const char *)command_buffer, COMMAND_LEN);
+
+
 void led_blinking_task(void);
 void audio_task(void);
 void usb_serial_init(void);
+uint cdc_task(uint8_t *buf, size_t buf_len);
+
+uint cdc_task(uint8_t *buf, size_t buf_len) {
+
+    if (tud_cdc_connected()) {
+        if (tud_cdc_available()) {
+            return tud_cdc_read(buf, buf_len);
+        }
+    }
+
+    return 0;
+}
+
+bool cdc_wait_for(std::string_view data, uint timeout_ms=50) {
+    timeout_state ts;
+    absolute_time_t until = delayed_by_ms(get_absolute_time(), timeout_ms);
+    check_timeout_fn check_timeout = init_single_timeout_until(&ts, until);
+
+    for(auto expected_char : data) {
+        char got_char;
+        while(1){
+            tud_task();
+            if (cdc_task((uint8_t *)&got_char, 1) == 1) break;
+            if(check_timeout(&ts, false)) return false;
+        }
+        if (got_char != expected_char) return false;
+    }
+    return true;
+}
+
+size_t cdc_get_bytes(const uint8_t *buffer, const size_t len, const uint timeout_ms=1000) {
+    memset((void *)buffer, len, 0);
+
+    uint8_t *p = (uint8_t *)buffer;
+
+    timeout_state ts;
+    absolute_time_t until = delayed_by_ms(get_absolute_time(), timeout_ms);
+    check_timeout_fn check_timeout = init_single_timeout_until(&ts, until);
+
+    size_t bytes_remaining = len;
+    while (bytes_remaining && !check_timeout(&ts, false)) {
+        tud_task(); // tinyusb device task
+        size_t bytes_read = cdc_task(p, std::min(bytes_remaining, MAX_UART_PACKET));
+        bytes_remaining -= bytes_read;
+        p += bytes_read;
+    }
+    return len - bytes_remaining;
+}
+
+void serial_task(void) {
+  if (tud_cdc_connected()) {
+      if (tud_cdc_available()) {
+        if(!cdc_wait_for("multiverse:")) {
+            return; // Couldn't get 16 bytes of command
+        }
+
+        if(cdc_get_bytes(command_buffer, COMMAND_LEN) != COMMAND_LEN) {
+            //display::info("cto");
+            return;
+        }
+
+        if(command == "_rst") {
+            sleep_ms(500);
+            save_and_disable_interrupts();
+            rosc_hw->ctrl = ROSC_CTRL_ENABLE_VALUE_ENABLE << ROSC_CTRL_ENABLE_LSB;
+            watchdog_reboot(0, 0, 0);
+            return;
+        }
+
+        if(command == "_usb") {
+            sleep_ms(500);
+            save_and_disable_interrupts();
+            rosc_hw->ctrl = ROSC_CTRL_ENABLE_VALUE_ENABLE << ROSC_CTRL_ENABLE_LSB;
+            reset_usb_boot(0, 0);
+            return;
+        }
+      }
+    }
+}
 
 /*------------- MAIN -------------*/
 int main(void)
@@ -149,6 +244,7 @@ int main(void)
   {
     tud_task(); // TinyUSB device task
     audio_task();
+    serial_task();
     //led_blinking_task();
     //i2s_audio_give_buffer(NULL, 0);
   }
@@ -270,10 +366,9 @@ static bool tud_audio_feature_unit_get_request(uint8_t rhport, audio_control_req
   {
     if (request->bRequest == AUDIO_CS_REQ_RANGE)
     {
-      audio_control_range_2_n_t(1) range_vol = {
-        .wNumSubRanges = tu_htole16(1),
-        .subrange[0] = { .bMin = tu_htole16(VOLUME_CTRL_0_DB), tu_htole16(VOLUME_CTRL_100_DB), tu_htole16(256) }
-      };
+      audio_control_range_2_n_t(1) range_vol;
+      range_vol.wNumSubRanges = tu_htole16(1);
+      range_vol.subrange[0] = { .bMin = tu_htole16(VOLUME_CTRL_0_DB), tu_htole16(VOLUME_CTRL_100_DB), tu_htole16(256) };
       TU_LOG1("Get channel %u volume range (%d, %d, %u) dB\r\n", request->bChannelNumber,
               range_vol.subrange[0].bMin / 256, range_vol.subrange[0].bMax / 256, range_vol.subrange[0].bRes / 256);
       return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &range_vol, sizeof(range_vol));
@@ -541,7 +636,6 @@ void audio_task(void)
     start_ms += volume_interval_ms;
   }
 }
-
 
 //--------------------------------------------------------------------+
 // BLINKING TASK
