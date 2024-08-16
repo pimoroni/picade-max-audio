@@ -18,8 +18,8 @@ void i2s_audio_init() {
 
     // initialize for 48k we allow changing later
     static audio_format_t audio_format_48k = {
-            .format = AUDIO_BUFFER_FORMAT_PCM_S16,
             .sample_freq = 48000,
+            .format = AUDIO_BUFFER_FORMAT_PCM_S16,
             .channel_count = 2,
     };
 

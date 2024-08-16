@@ -25,9 +25,9 @@ include(drivers/button/button)
 add_executable(${NAME})
 
 target_sources(${NAME} PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/main.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/i2s_audio.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/usb_descriptors.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/i2s_audio.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/usb_descriptors.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/board.cpp
 )
 
