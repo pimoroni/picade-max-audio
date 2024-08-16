@@ -1,14 +1,23 @@
-# Pico TinyUSB i2s Speaker
+# Picade Max: Audio And Volume Control Board
 
-A USB speaker firmware for the RP2040/Pico using TinyUSB and i2s.
+Firmware for the Picade Max audio board. Includes encoder volume control with
+push-button mute.
+
+## Status LED
+
+* Red - Lights up when board is muted
+* Green - Should idle blink at 1s intervals, and flash quickly when audio is streaming
+* Blue - Brightness indicates volume
 
 ## Updating the firmware for the board
 
 Push the volume button in for 2 seconds and hold.
 
+Alternatively run `echo "multiverse:_usb" > /dev/serial/by-id/usb-Pimoroni_Picade_USB_Audio_*-if02` via SSH or a terminal.
+
 This will put the audio board into bootloader mode.
 
-If you're using Recalbox, you may see a pop up that states a new USB device named RPI-RP2 has been discovered and asks you if you wish to initialise.  You can ignore this screen.
+If you're using Recalbox, you may see a pop up that states a new USB device named RPI-RP2 has been discovered and asks you if you wish to initialise. You can ignore this screen.
 
 If you don't have any other external USB devices plugged in, you should be able to access the bootloader at:
 
