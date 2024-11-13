@@ -89,7 +89,7 @@ enum
 
 static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
 
-int system_volume = 255;
+int system_volume = 128;
 int volume_speed = 10;
 
 uint8_t led_red = 0;
@@ -179,7 +179,6 @@ void serial_task(void) {
         }
 
         if(cdc_get_bytes(command_buffer, COMMAND_LEN) != COMMAND_LEN) {
-            //display::info("cto");
             return;
         }
 
@@ -205,7 +204,8 @@ void serial_task(void) {
 /*------------- MAIN -------------*/
 int main(void)
 {
-
+  volume[0] = volume[1] = system_volume * 100;
+  mute[0] = mute[1] = false;
   system_init();
 
   board_init();
