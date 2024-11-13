@@ -25,6 +25,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <string_view>
 #include <sys/param.h> // MIN and MAX
 
 #include "bsp/board_api.h"
@@ -33,6 +34,13 @@
 #include "i2s_audio.h"
 #include "board_config.h"
 #include "board.h"
+
+#include "hardware/clocks.h"
+#include "hardware/vreg.h"
+#include "pico/bootrom.h"
+#include "hardware/structs/rosc.h"
+#include "hardware/watchdog.h"
+#include "pico/timeout_helper.h"
 
 // Approximate exponential volume ramp - (n / 64) ^ 4
 // Tested with pure square for perceptual loudness.
@@ -84,6 +92,10 @@ static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
 int system_volume = 255;
 int volume_speed = 10;
 
+uint8_t led_red = 0;
+uint8_t led_green = 0;
+uint8_t led_blue = 0;
+
 // Audio controls
 // Current states
 int8_t mute[CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX + 1];       // +1 for master channel 0
@@ -99,42 +111,107 @@ const uint8_t resolutions_per_format[CFG_TUD_AUDIO_FUNC_1_N_FORMATS] = {CFG_TUD_
 // Current resolution, update on format change
 uint8_t current_resolution;
 
-void led_blinking_task(void);
+
+const size_t MAX_UART_PACKET = 64;
+
+const size_t COMMAND_LEN = 4;
+uint8_t command_buffer[COMMAND_LEN];
+std::string_view command((const char *)command_buffer, COMMAND_LEN);
+
+
+void led_task(void);
 void audio_task(void);
 void usb_serial_init(void);
+uint cdc_task(uint8_t *buf, size_t buf_len);
+
+uint cdc_task(uint8_t *buf, size_t buf_len) {
+
+    if (tud_cdc_connected()) {
+        if (tud_cdc_available()) {
+            return tud_cdc_read(buf, buf_len);
+        }
+    }
+
+    return 0;
+}
+
+bool cdc_wait_for(std::string_view data, uint timeout_ms=50) {
+    timeout_state ts;
+    absolute_time_t until = delayed_by_ms(get_absolute_time(), timeout_ms);
+    check_timeout_fn check_timeout = init_single_timeout_until(&ts, until);
+
+    for(auto expected_char : data) {
+        char got_char;
+        while(1){
+            tud_task();
+            if (cdc_task((uint8_t *)&got_char, 1) == 1) break;
+            if(check_timeout(&ts, false)) return false;
+        }
+        if (got_char != expected_char) return false;
+    }
+    return true;
+}
+
+size_t cdc_get_bytes(const uint8_t *buffer, const size_t len, const uint timeout_ms=1000) {
+    memset((void *)buffer, len, 0);
+
+    uint8_t *p = (uint8_t *)buffer;
+
+    timeout_state ts;
+    absolute_time_t until = delayed_by_ms(get_absolute_time(), timeout_ms);
+    check_timeout_fn check_timeout = init_single_timeout_until(&ts, until);
+
+    size_t bytes_remaining = len;
+    while (bytes_remaining && !check_timeout(&ts, false)) {
+        tud_task(); // tinyusb device task
+        size_t bytes_read = cdc_task(p, std::min(bytes_remaining, MAX_UART_PACKET));
+        bytes_remaining -= bytes_read;
+        p += bytes_read;
+    }
+    return len - bytes_remaining;
+}
+
+void serial_task(void) {
+  if (tud_cdc_connected()) {
+      if (tud_cdc_available()) {
+        if(!cdc_wait_for("multiverse:")) {
+            return; // Couldn't get 16 bytes of command
+        }
+
+        if(cdc_get_bytes(command_buffer, COMMAND_LEN) != COMMAND_LEN) {
+            //display::info("cto");
+            return;
+        }
+
+        if(command == "_rst") {
+            sleep_ms(500);
+            save_and_disable_interrupts();
+            rosc_hw->ctrl = ROSC_CTRL_ENABLE_VALUE_ENABLE << ROSC_CTRL_ENABLE_LSB;
+            watchdog_reboot(0, 0, 0);
+            return;
+        }
+
+        if(command == "_usb") {
+            sleep_ms(500);
+            save_and_disable_interrupts();
+            rosc_hw->ctrl = ROSC_CTRL_ENABLE_VALUE_ENABLE << ROSC_CTRL_ENABLE_LSB;
+            reset_usb_boot(0, 0);
+            return;
+        }
+      }
+    }
+}
 
 /*------------- MAIN -------------*/
 int main(void)
 {
 
-/*
-  gpio_init(LED_R);
-  gpio_set_function(LED_R, GPIO_FUNC_SIO);
-  gpio_set_dir(LED_R, GPIO_OUT);
-  gpio_put(LED_R, 1);
-
-  gpio_init(LED_G);
-  gpio_set_function(LED_G, GPIO_FUNC_SIO);
-  gpio_set_dir(LED_G, GPIO_OUT);
-  gpio_put(LED_G, 1);
-
-  gpio_init(LED_B);
-  gpio_set_function(LED_B, GPIO_FUNC_SIO);
-  gpio_set_dir(LED_B, GPIO_OUT);
-  gpio_put(LED_B, 1);
-*/
-
-  /* HACK: To allow testing on a basic Pico with a button on Pin 12
-  gpio_init(PICO_UNICORN_A);
-  gpio_set_function(PICO_UNICORN_A, GPIO_FUNC_SIO);
-  gpio_set_dir(PICO_UNICORN_A, GPIO_IN);
-  gpio_pull_up(PICO_UNICORN_A);
-  */
-
   system_init();
 
   board_init();
+
   // Fetch the Pico serial (actually the flash chip ID) into `usb_serial`
+  // This has nothing to do with CDC serial!
   usb_serial_init();
 
   // init device stack on configured roothub port
@@ -143,14 +220,14 @@ int main(void)
   i2s_audio_init();
   i2s_audio_start();
 
-  TU_LOG1("Headset running\r\n");
+  TU_LOG1("Picade Max Audio Running\r\n");
 
   while (1)
   {
-    tud_task(); // TinyUSB device task
+    tud_task();
     audio_task();
-    //led_blinking_task();
-    //i2s_audio_give_buffer(NULL, 0);
+    serial_task();
+    led_task();
   }
 }
 
@@ -270,10 +347,9 @@ static bool tud_audio_feature_unit_get_request(uint8_t rhport, audio_control_req
   {
     if (request->bRequest == AUDIO_CS_REQ_RANGE)
     {
-      audio_control_range_2_n_t(1) range_vol = {
-        .wNumSubRanges = tu_htole16(1),
-        .subrange[0] = { .bMin = tu_htole16(VOLUME_CTRL_0_DB), tu_htole16(VOLUME_CTRL_100_DB), tu_htole16(256) }
-      };
+      audio_control_range_2_n_t(1) range_vol;
+      range_vol.wNumSubRanges = tu_htole16(1);
+      range_vol.subrange[0] = { .bMin = tu_htole16(VOLUME_CTRL_0_DB), tu_htole16(VOLUME_CTRL_100_DB), tu_htole16(256) };
       TU_LOG1("Get channel %u volume range (%d, %d, %u) dB\r\n", request->bChannelNumber,
               range_vol.subrange[0].bMin / 256, range_vol.subrange[0].bMax / 256, range_vol.subrange[0].bRes / 256);
       return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &range_vol, sizeof(range_vol));
@@ -292,6 +368,7 @@ static bool tud_audio_feature_unit_get_request(uint8_t rhport, audio_control_req
 }
 
 // Helper for feature unit set requests
+// This handles volume control and mute requests coming from the USB host to Picade Max Audio
 static bool tud_audio_feature_unit_set_request(uint8_t rhport, audio_control_request_t const *request, uint8_t const *buf)
 {
   (void)rhport;
@@ -307,11 +384,8 @@ static bool tud_audio_feature_unit_set_request(uint8_t rhport, audio_control_req
 
     TU_LOG1("Set channel %d Mute: %d\r\n", request->bChannelNumber, mute[request->bChannelNumber]);
 
-    if(mute[request->bChannelNumber]) {
-      system_led(255, 0, 0);
-    } else {
-      system_led(0, 0, 0);
-    }
+    // Set the red LED channel to indicate mute
+    led_red = mute[request->bChannelNumber] ? 255 : 0;
   
     return true;
   }
@@ -321,7 +395,8 @@ static bool tud_audio_feature_unit_set_request(uint8_t rhport, audio_control_req
 
     volume[request->bChannelNumber] = tu_le16toh(((audio_control_cur_2_t const *)buf)->bCur);
 
-    system_led(0, 0, MIN(255, volume[request->bChannelNumber] / 100));
+    // Set the blue LED channel to indicate volume
+    led_blue = MIN(255, volume[request->bChannelNumber] / 100);
 
     system_volume = MIN(255u, volume[request->bChannelNumber] / 100);
 
@@ -437,24 +512,9 @@ void audio_task(void)
   static uint32_t start_ms = 0;
   uint32_t volume_interval_ms = 50;
 
-  // When new data arrived, copy data from speaker buffer, to microphone buffer
-  // and send it over
-  // Only support speaker & headphone both have the same resolution
-  // If one is 16bit another is 24bit be care of LOUD noise !
   if (spk_data_size)
   {
-    //led_b_state = !led_b_state;
-    //gpio_put(LED_B, led_b_state);
-
     // "Hardware" volume is 0 - 100 in steps of 256, with a maximum value of 25600
-  
-    //unsigned int current_volume = (unsigned int)volume[0] * volume_ramp[(uint8_t)system_volume] / 25600;
-
-    /*int current_volume = volume[0] / 100;
-    if (current_volume > 256) current_volume = 256;
-    if (current_volume < 0) current_volume = 0;
-    current_volume = volume_ramp[current_volume];*/
-
     int current_volume = volume_ramp[system_volume];
 
     if (mute[0]) {
@@ -465,18 +525,29 @@ void audio_task(void)
     spk_data_size = 0;
   }
 
+  // Only handle volume control changes every volume_interval_ms
+  // The encoder driver should - I believe - asynchronously gather a delta to be handled here
   if (board_millis() - start_ms >= volume_interval_ms)
   {
+    // This is just the raw delta from the encoder
     int32_t volume_delta = get_volume_delta();
+
+    // Adjust the speed of volume control (number of volume steps per encoder turn)
+    volume_delta *= volume_speed;
 
     // Long press triggers reset to bootloader
     handle_mute_button_held();
 
     if(get_mute_button_pressed()) {
+      // Toggle one channel and copy the mute value to the other
+      // We don't want to end up with one muted and one unmuted somehow...
       mute[0] = !mute[0];
-      mute[1] = !mute[1];
+      mute[1] = mute[0];
 
-      // Mute was changed
+      // Illuminate the LED red if muted
+      led_red = mute[0] ? 255 : 0;
+
+      // Mute was changed - notify the host with an interrupt
       // 6.1 Interrupt Data Message
       const audio_interrupt_data_t data = {
         .bInfo = 0,                                       // Class-specific interrupt, originated from an interface
@@ -488,19 +559,12 @@ void audio_task(void)
       };
 
       tud_audio_int_write(&data);
+      // Call tud_task to handle the interrupt to host
       tud_task();
     }
-    /*if(volume_delta > 0) {
-      system_led(0, 255, 0);
-    } else if (volume_delta < 0) {
-      system_led(0, 0, 255);
-    } else {
-      system_led(0, 0, 0);
-    }*/
-
-    volume_delta *= volume_speed;
 
     int old_system_volume = system_volume;
+
 
     if(volume_delta + system_volume > 255) {
         system_volume = 255;
@@ -510,21 +574,13 @@ void audio_task(void)
         system_volume += volume_delta;
     }
 
-    /* HACK: To allow testing on a basic Pico with a button on Pin 12
-    if(!gpio_get(PICO_UNICORN_A)) {
-      system_volume ++;
-      system_volume %= 255;
-      volume_delta = 1;
-    }
-    */
-
     if(system_volume != old_system_volume) {
-      system_led(0, system_volume, 0);
+      led_blue = system_volume;
 
       volume[0] = system_volume * 100;
       volume[1] = system_volume * 100;
 
-      // Volume has changed
+      // Volume has changed - notify the host with an interrupt
       // 6.1 Interrupt Data Message
       const audio_interrupt_data_t data = {
         .bInfo = 0,                                       // Class-specific interrupt, originated from an interface
@@ -536,27 +592,29 @@ void audio_task(void)
       };
 
       tud_audio_int_write(&data);
+      // Call tud_task to handle the interrupt to host
+      tud_task();
     }
 
     start_ms += volume_interval_ms;
   }
 }
 
-
 //--------------------------------------------------------------------+
 // BLINKING TASK
 //--------------------------------------------------------------------+
-void led_blinking_task(void)
+void led_task(void)
 {
   static uint32_t start_ms = 0;
   static bool led_state = false;
 
   // Blink every interval ms
-  if (board_millis() - start_ms < blink_interval_ms) return;
-  start_ms += blink_interval_ms;
+  if (board_millis() - start_ms >= blink_interval_ms) {
+    start_ms += blink_interval_ms;
 
-  //board_led_write(led_state);
-  //gpio_put(LED_G, led_state);
-  system_led(255 * led_state, 0, 0);
-  led_state = 1 - led_state;
+    led_green = led_state ? 64 : 0;
+    led_state = !led_state;
+  }
+
+  system_led(led_red, led_green, led_blue);
 }

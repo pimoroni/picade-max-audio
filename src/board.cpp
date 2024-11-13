@@ -20,52 +20,51 @@ Button button(BUTTON, pimoroni::ACTIVE_LOW, 0);
 bool pressed = false;
 absolute_time_t pressed_time;
 
-extern "C" {
-    void system_init() {
-        // Apply a modest overvolt, default is 1.10v.
-        // this is required for a stable 250MHz on some RP2040s
-        vreg_set_voltage(VREG_VOLTAGE_1_20);
-        sleep_ms(10);
-        set_sys_clock_khz(250000, true);
 
-        // DCDC PSM control
-        // 0: PFM mode (best efficiency)
-        // 1: PWM mode (improved ripple)
-        gpio_init(PIN_DCDC_PSM_CTRL);
-        gpio_set_dir(PIN_DCDC_PSM_CTRL, GPIO_OUT);
-        gpio_put(PIN_DCDC_PSM_CTRL, 1); // PWM mode for less Audio noise
+void system_init() {
+    // Apply a modest overvolt, default is 1.10v.
+    // this is required for a stable 250MHz on some RP2040s
+    vreg_set_voltage(VREG_VOLTAGE_1_20);
+    sleep_ms(10);
+    set_sys_clock_khz(250000, true);
 
-        volume_control.init();
-    }
+    // DCDC PSM control
+    // 0: PFM mode (best efficiency)
+    // 1: PWM mode (improved ripple)
+    gpio_init(PIN_DCDC_PSM_CTRL);
+    gpio_set_dir(PIN_DCDC_PSM_CTRL, GPIO_OUT);
+    gpio_put(PIN_DCDC_PSM_CTRL, 1); // PWM mode for less Audio noise
 
-    int32_t get_volume_delta() {
-        return volume_control.delta();
-    }
+    volume_control.init();
+}
 
-    bool get_mute_button_pressed() {
-        return button.read();
-    }
+int32_t get_volume_delta() {
+    return volume_control.delta();
+}
 
-    void handle_mute_button_held() {
+bool get_mute_button_pressed() {
+    return button.read();
+}
+
+void handle_mute_button_held() {
 #ifdef DEBUG_BOOTLOADER_SHORTCUT
-        bool current = button.raw();
-        if(current && pressed) {
-            if (absolute_time_diff_us(pressed_time, get_absolute_time()) >= 2000000ul) {
-                sleep_ms(500);
-                save_and_disable_interrupts();
-                rosc_hw->ctrl = ROSC_CTRL_ENABLE_VALUE_ENABLE << ROSC_CTRL_ENABLE_LSB;
-                reset_usb_boot(0, 0);
-            }
-        } else if (current) {
-            pressed_time = get_absolute_time();
-            pressed = true;
-        } else {
-            pressed = false;
+    bool current = button.raw();
+    if(current && pressed) {
+        if (absolute_time_diff_us(pressed_time, get_absolute_time()) >= 2000000ul) {
+            sleep_ms(500);
+            save_and_disable_interrupts();
+            rosc_hw->ctrl = ROSC_CTRL_ENABLE_VALUE_ENABLE << ROSC_CTRL_ENABLE_LSB;
+            reset_usb_boot(0, 0);
         }
+    } else if (current) {
+        pressed_time = get_absolute_time();
+        pressed = true;
+    } else {
+        pressed = false;
+    }
 #endif
-    }
+}
 
-    void system_led(uint8_t r, uint8_t g, uint8_t b) {
-        rgbled.set_rgb(r, g, b);
-    }
+void system_led(uint8_t r, uint8_t g, uint8_t b) {
+    rgbled.set_rgb(r, g, b);
 }
