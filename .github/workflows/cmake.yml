@@ -56,7 +56,7 @@ jobs:
       with:
         repository: raspberrypi/pico-extras
         path: pico-extras
-        ref: sdk-2.0.0
+        ref: sdk-2.1.1
         submodules: true
 
     - name: Install Arm GNU Toolchain (arm-none-eabi-gcc)
