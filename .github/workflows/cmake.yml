@@ -16,7 +16,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-20.04
+          - os: ubuntu-24.04
             name: Linux
             cache-key: linux
             cmake-args: '-DPIMORONI_PICO_PATH=$GITHUB_WORKSPACE/pimoroni-pico -DPICO_SDK_PATH=$GITHUB_WORKSPACE/pico-sdk'
@@ -47,7 +47,7 @@ jobs:
       with:
         repository: raspberrypi/pico-sdk
         path: pico-sdk
-        ref: 2.0.0
+        ref: '2.1.1'
         submodules: true
 
     # Checkout Pico Extras
@@ -56,13 +56,25 @@ jobs:
       with:
         repository: raspberrypi/pico-extras
         path: pico-extras
-        ref: sdk-2.0.0
+        ref: sdk-2.1.1
         submodules: true
 
     - name: Install Arm GNU Toolchain (arm-none-eabi-gcc)
       uses: carlosperate/arm-none-eabi-gcc-action@v1
       with:
-        release: '12.2.Rel1'
+        release: '13.3.Rel1'
+
+    # CMake 4.0 - erroneously introduced into GitHub runners? -
+    # removed support for <3.5 and mbedtls hits this
+    # https://github.com/raspberrypi/pico-sdk/issues/2391
+    # https://github.com/actions/runner-images/issues/11926
+    - name: Setup cmake
+      uses: jwlawson/actions-setup-cmake@v2
+      with:
+        cmake-version: '3.31.6'
+
+    - name: CMake Version
+      run: cmake --version
 
     - name: Create Build Environment
       run: cmake -E make_directory ${{runner.workspace}}/build
@@ -101,22 +113,12 @@ jobs:
 
     - name: Upload .zip
       if: github.event_name == 'release'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+      uses: softprops/action-gh-release@v1
       with:
-        asset_path: ${{runner.workspace}}/build/${{env.RELEASE_FILE}}.zip
-        upload_url: ${{github.event.release.upload_url}}
-        asset_name: ${{env.RELEASE_FILE}}.zip
-        asset_content_type: application/zip
+        files: ${{runner.workspace}}/build/${{env.RELEASE_FILE}}.zip
 
     - name: Upload .tar.gz
       if: github.event_name == 'release'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+      uses: softprops/action-gh-release@v1
       with:
-        asset_path: ${{runner.workspace}}/build/${{env.RELEASE_FILE}}.tar.gz
-        upload_url: ${{github.event.release.upload_url}}
-        asset_name: ${{env.RELEASE_FILE}}.tar.gz
-        asset_content_type: application/octet-stream
+        files: ${{runner.workspace}}/build/${{env.RELEASE_FILE}}.tar.gz
