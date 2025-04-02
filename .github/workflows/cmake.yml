@@ -47,7 +47,7 @@ jobs:
       with:
         repository: raspberrypi/pico-sdk
         path: pico-sdk
-        ref: 2.0.0
+        ref: '2.1.1'
         submodules: true
 
     # Checkout Pico Extras
