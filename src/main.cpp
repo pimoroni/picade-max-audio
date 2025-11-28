@@ -203,6 +203,23 @@ void serial_task(void) {
 }
 
 /*------------- MAIN -------------*/
+void __isr __time_critical_func(audio_i2s_get_data_handler)() {
+  spk_data_size = tud_audio_read(spk_buf, sizeof(spk_buf));
+
+  if (spk_data_size)
+  {
+    // "Hardware" volume is 0 - 100 in steps of 256, with a maximum value of 25600
+    int current_volume = volume_ramp[system_volume];
+
+    if (mute[0]) {
+      current_volume = 0;
+    }
+
+    i2s_audio_give_buffer(spk_buf, (size_t)spk_data_size, current_resolution, current_volume);
+    spk_data_size = 0;
+  }
+}
+
 int main(void)
 {
 
@@ -221,6 +238,8 @@ int main(void)
   i2s_audio_start();
 
   TU_LOG1("Picade Max Audio Running\r\n");
+
+  irq_add_shared_handler(DMA_IRQ_0 + PICO_AUDIO_I2S_DMA_IRQ, audio_i2s_get_data_handler, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
 
   while (1)
   {
@@ -501,7 +520,7 @@ void audio_task(void)
   static uint32_t start_ms = 0;
   uint32_t volume_interval_ms = 50;
 
-  spk_data_size = tud_audio_read(spk_buf, sizeof(spk_buf));
+  /*spk_data_size = tud_audio_read(spk_buf, sizeof(spk_buf));
 
   if (spk_data_size)
   {
@@ -514,7 +533,7 @@ void audio_task(void)
 
     i2s_audio_give_buffer(spk_buf, (size_t)spk_data_size, current_resolution, current_volume);
     spk_data_size = 0;
-  }
+  }*/
 
   // Only handle volume control changes every volume_interval_ms
   // The encoder driver should - I believe - asynchronously gather a delta to be handled here

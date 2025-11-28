@@ -83,13 +83,23 @@ void usb_serial_init(void) {
 #define EPNUM_CDC_IN      0x84
 
 
+enum STRING {
+  STR_LANGUAGE = 0x00,
+  STR_MANUFACTURER,
+  STR_PRODUCT,
+  STR_SERIAL,
+  STR_AUDIO_INTERFACE,
+  STR_CDC_SERIAL_INTERFACE
+};
+
+
 uint8_t const desc_configuration[] =
 {
     // Config number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 100),
 
     // Interface number, string index, EP Out & EP In address, EP size
-    TUD_AUDIO20_SPEAKER_STEREO_DESCRIPTOR(0x04, EPNUM_AUDIO_OUT, EPNUM_AUDIO_INT | 0x80),
+    TUD_AUDIO20_SPEAKER_STEREO_DESCRIPTOR(STR_AUDIO_INTERFACE, EPNUM_AUDIO_OUT, EPNUM_AUDIO_INT | 0x80),
 
     // CDC: Interface number, string index, EP notification address and size, EP data address (out, in) and size.
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 5, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64)
