@@ -67,8 +67,8 @@ jobs:
     - name: Bump TinyUSB
       run: |
         cd $GITHUB_WORKSPACE/pico-sdk/lib/tinyusb
-        git fetch origin 0.20.0
-        git checkout 0.20.0
+        git fetch origin refs/tags/0.20.0:refs/tags/0.20.0
+        git checkout refs/tags/0.20.0
 
     - name: Create Build Environment
       run: cmake -E make_directory ${{runner.workspace}}/build
