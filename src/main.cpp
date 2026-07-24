@@ -389,12 +389,15 @@ static bool audio20_feature_unit_get_request(uint8_t rhport, tusb_control_reques
   uint8_t const ctrl_sel = TU_U16_HIGH(p_request->wValue);
   uint8_t const channel_num = TU_U16_LOW(p_request->wValue);
 
+  // A channel number beyond the master and the logical channels addresses them
+  // all at once, so report the master. Never index the arrays with it directly.
+  uint8_t const channel = channel_num < TU_ARRAY_SIZE(volume) ? channel_num : 0;
+
   TU_ASSERT(TU_U16_HIGH(p_request->wIndex) == UAC2_ENTITY_SPK_FEATURE_UNIT);
-  TU_VERIFY(channel_num < TU_ARRAY_SIZE(volume));
 
   if (ctrl_sel == AUDIO20_FU_CTRL_MUTE && p_request->bRequest == AUDIO20_CS_REQ_CUR)
   {
-    audio20_control_cur_1_t mute1 = { .bCur = mute[channel_num] };
+    audio20_control_cur_1_t mute1 = { .bCur = mute[channel] };
     TU_LOG1("Get channel %u mute %d\r\n", channel_num, mute1.bCur);
     return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &mute1, sizeof(mute1));
   }
@@ -411,7 +414,7 @@ static bool audio20_feature_unit_get_request(uint8_t rhport, tusb_control_reques
     }
     else if (p_request->bRequest == AUDIO20_CS_REQ_CUR)
     {
-      audio20_control_cur_2_t cur_vol = { .bCur = tu_htole16(volume[channel_num]) };
+      audio20_control_cur_2_t cur_vol = { .bCur = tu_htole16(volume[channel]) };
       TU_LOG1("Get channel %u volume %d dB\r\n", channel_num, cur_vol.bCur / 256);
       return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &cur_vol, sizeof(cur_vol));
     }
@@ -431,20 +434,30 @@ static bool audio20_feature_unit_set_request(uint8_t rhport, tusb_control_reques
   uint8_t const ctrl_sel = TU_U16_HIGH(p_request->wValue);
   uint8_t const channel_num = TU_U16_LOW(p_request->wValue);
 
+  // A channel number beyond the master and the logical channels addresses them
+  // all at once. Never index the arrays with it directly.
+  bool const all_channels = channel_num >= TU_ARRAY_SIZE(volume);
+  uint8_t const channel = all_channels ? 0 : channel_num;
+
   TU_ASSERT(TU_U16_HIGH(p_request->wIndex) == UAC2_ENTITY_SPK_FEATURE_UNIT);
-  TU_VERIFY(channel_num < TU_ARRAY_SIZE(volume));
   TU_VERIFY(p_request->bRequest == AUDIO20_CS_REQ_CUR);
 
   if (ctrl_sel == AUDIO20_FU_CTRL_MUTE)
   {
     TU_VERIFY(p_request->wLength == sizeof(audio20_control_cur_1_t));
 
-    mute[channel_num] = ((audio20_control_cur_1_t const *)buf)->bCur;
+    int8_t const requested = ((audio20_control_cur_1_t const *)buf)->bCur;
 
-    TU_LOG1("Set channel %d Mute: %d\r\n", channel_num, mute[channel_num]);
+    if (all_channels) {
+      for (size_t i = 0; i < TU_ARRAY_SIZE(mute); i++) mute[i] = requested;
+    } else {
+      mute[channel] = requested;
+    }
+
+    TU_LOG1("Set channel %d Mute: %d\r\n", channel_num, requested);
 
     // Set the red LED channel to indicate mute
-    led_red = mute[channel_num] ? 255 : 0;
+    led_red = mute[0] ? 255 : 0;
 
     return true;
   }
@@ -452,14 +465,20 @@ static bool audio20_feature_unit_set_request(uint8_t rhport, tusb_control_reques
   {
     TU_VERIFY(p_request->wLength == sizeof(audio20_control_cur_2_t));
 
-    volume[channel_num] = tu_le16toh(((audio20_control_cur_2_t const *)buf)->bCur);
+    int16_t const requested = tu_le16toh(((audio20_control_cur_2_t const *)buf)->bCur);
 
-    output_volume = volume[channel_num];
+    if (all_channels) {
+      for (size_t i = 0; i < TU_ARRAY_SIZE(volume); i++) volume[i] = requested;
+    } else {
+      volume[channel] = requested;
+    }
+
+    output_volume = requested;
 
     // Set the blue LED channel to indicate volume
     led_blue = volume_to_led(output_volume);
 
-    TU_LOG1("Set channel %d volume: %d dB\r\n", channel_num, volume[channel_num] / 256);
+    TU_LOG1("Set channel %d volume: %d dB\r\n", channel_num, requested / 256);
 
     return true;
   }
