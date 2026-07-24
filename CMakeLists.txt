@@ -35,7 +35,8 @@ target_include_directories(${NAME} PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}/src
 )
 
-add_compile_definitions(${NAME}
+# Directory scope so the pico_audio_i2s sources pick up the pin configuration
+add_compile_definitions(
         NDEBUG
         PICO_AUDIO_I2S_DMA_IRQ=0
         PICO_AUDIO_I2S_PIO=0
