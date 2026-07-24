@@ -26,7 +26,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <string_view>
-#include <sys/param.h> // MIN and MAX
 
 #include "bsp/board_api.h"
 #include "tusb.h"
@@ -42,25 +41,17 @@
 #include "hardware/watchdog.h"
 #include "pico/timeout_helper.h"
 
-// Approximate exponential volume ramp - (n / 64) ^ 4
-// Tested with pure square for perceptual loudness.
-const uint8_t volume_ramp[] = {
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2,
-  2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4,
-  5, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 8, 8, 8, 9,
-  9, 9, 10, 10, 10, 11, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15,
-  16, 16, 17, 17, 18, 18, 19, 19, 20, 20, 21, 22, 22, 23, 24, 24,
-  25, 26, 27, 27, 28, 29, 30, 30, 31, 32, 33, 34, 35, 36, 37, 38,
-  39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 52, 53, 54, 55,
-  57, 58, 59, 61, 62, 63, 65, 66, 68, 69, 71, 72, 74, 76, 77, 79,
-  81, 82, 84, 86, 87, 89, 91, 93, 95, 97, 99, 101, 103, 105, 107, 109,
-  111, 113, 115, 118, 120, 122, 125, 127, 129, 132, 134, 137, 139, 142, 144, 147,
-  150, 152, 155, 158, 161, 163, 166, 169, 172, 175, 178, 181, 184, 188, 191, 194,
-  197, 201, 204, 207, 211, 214, 218, 221, 225, 229, 232, 236, 240, 244, 248, 255
+// Attenuation in whole dB to the linear gain applied by i2s_audio_give_buffer,
+// which multiplies each sample by gain / 256. An 8 bit gain bottoms out at
+// 1 / 256, so -48 dB is the quietest step below unity.
+// gain = round(256 * 10 ^ (-dB / 20)), clamped to 255.
+const uint8_t attenuation_gain[] = {
+  255, 228, 203, 181, 162, 144, 128, 114, 102, 91,  // -0 to -9 dB
+  81, 72, 64, 57, 51, 46, 41, 36, 32, 29,           // -10 to -19 dB
+  26, 23, 20, 18, 16, 14, 13, 11, 10, 9,            // -20 to -29 dB
+  8, 7, 6, 6, 5, 5, 4, 4, 3, 3,                     // -30 to -39 dB
+  3, 2, 2, 2, 2, 1, 1, 1, 1, 1,                     // -40 to -49 dB
+  1                                                 // -50 dB
 };
 
 //--------------------------------------------------------------------+
@@ -89,8 +80,16 @@ enum
 
 static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
 
-int system_volume = 255;
-int volume_speed = 10;
+// USB Audio Class volume is signed 1/256 dB, where 0 dB is unity gain and
+// negative values attenuate. Both the host and the encoder work in these units.
+const int16_t VOLUME_MIN = -VOLUME_CTRL_50_DB;
+const int16_t VOLUME_MAX = VOLUME_CTRL_0_DB;
+
+// dB per encoder detent
+const int16_t volume_step = 2 * 256;
+
+// Volume actually applied to the audio, set by the host or the encoder
+int16_t output_volume = VOLUME_MAX;
 
 uint8_t led_red = 0;
 uint8_t led_green = 0;
@@ -100,6 +99,27 @@ uint8_t led_blue = 0;
 // Current states
 int8_t mute[CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX + 1];       // +1 for master channel 0
 int16_t volume[CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX + 1];    // +1 for master channel 0
+
+// Convert a USB Audio Class volume into the linear gain the I2S path applies.
+// The minimum of the advertised range is silent, so a slider at the bottom is
+// silent rather than merely very quiet.
+static uint8_t volume_to_gain(int16_t volume_db)
+{
+  if (volume_db <= VOLUME_MIN) return 0;
+  if (volume_db >= VOLUME_MAX) return attenuation_gain[0];
+
+  // Round to the nearest whole dB of attenuation
+  const int attenuation_db = (VOLUME_MAX - volume_db + 128) / 256;
+  return attenuation_gain[attenuation_db];
+}
+
+// Position within the advertised volume range, for the LED
+static uint8_t volume_to_led(int16_t volume_db)
+{
+  if (volume_db <= VOLUME_MIN) return 0;
+  if (volume_db >= VOLUME_MAX) return 255;
+  return (uint8_t)(255 * (volume_db - VOLUME_MIN) / (VOLUME_MAX - VOLUME_MIN));
+}
 
 // Buffer for speaker data
 int32_t spk_buf[CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ / 4];
@@ -213,8 +233,7 @@ void __isr __time_critical_func(audio_i2s_get_data_handler)() {
 
   if (spk_data_size)
   {
-    // "Hardware" volume is 0 - 100 in steps of 256, with a maximum value of 25600
-    int current_volume = volume_ramp[system_volume];
+    uint8_t current_volume = volume_to_gain(output_volume);
 
     if (mute[0]) {
       current_volume = 0;
@@ -371,6 +390,7 @@ static bool audio20_feature_unit_get_request(uint8_t rhport, tusb_control_reques
   uint8_t const channel_num = TU_U16_LOW(p_request->wValue);
 
   TU_ASSERT(TU_U16_HIGH(p_request->wIndex) == UAC2_ENTITY_SPK_FEATURE_UNIT);
+  TU_VERIFY(channel_num < TU_ARRAY_SIZE(volume));
 
   if (ctrl_sel == AUDIO20_FU_CTRL_MUTE && p_request->bRequest == AUDIO20_CS_REQ_CUR)
   {
@@ -384,7 +404,7 @@ static bool audio20_feature_unit_get_request(uint8_t rhport, tusb_control_reques
     {
       audio20_control_range_2_n_t(1) range_vol;
       range_vol.wNumSubRanges = tu_htole16(1);
-      range_vol.subrange[0] = { .bMin = tu_htole16(VOLUME_CTRL_0_DB), tu_htole16(VOLUME_CTRL_100_DB), tu_htole16(256) };
+      range_vol.subrange[0] = { .bMin = tu_htole16(VOLUME_MIN), tu_htole16(VOLUME_MAX), tu_htole16(256) };
       TU_LOG1("Get channel %u volume range (%d, %d, %u) dB\r\n", channel_num,
               range_vol.subrange[0].bMin / 256, range_vol.subrange[0].bMax / 256, range_vol.subrange[0].bRes / 256);
       return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &range_vol, sizeof(range_vol));
@@ -412,6 +432,7 @@ static bool audio20_feature_unit_set_request(uint8_t rhport, tusb_control_reques
   uint8_t const channel_num = TU_U16_LOW(p_request->wValue);
 
   TU_ASSERT(TU_U16_HIGH(p_request->wIndex) == UAC2_ENTITY_SPK_FEATURE_UNIT);
+  TU_VERIFY(channel_num < TU_ARRAY_SIZE(volume));
   TU_VERIFY(p_request->bRequest == AUDIO20_CS_REQ_CUR);
 
   if (ctrl_sel == AUDIO20_FU_CTRL_MUTE)
@@ -433,10 +454,10 @@ static bool audio20_feature_unit_set_request(uint8_t rhport, tusb_control_reques
 
     volume[channel_num] = tu_le16toh(((audio20_control_cur_2_t const *)buf)->bCur);
 
-    // Set the blue LED channel to indicate volume
-    led_blue = MIN(255, volume[channel_num] / 100);
+    output_volume = volume[channel_num];
 
-    system_volume = MIN(255u, volume[channel_num] / 100);
+    // Set the blue LED channel to indicate volume
+    led_blue = volume_to_led(output_volume);
 
     TU_LOG1("Set channel %d volume: %d dB\r\n", channel_num, volume[channel_num] / 256);
 
@@ -543,8 +564,7 @@ void audio_task(void)
 
   if (spk_data_size)
   {
-    // "Hardware" volume is 0 - 100 in steps of 256, with a maximum value of 25600
-    int current_volume = volume_ramp[system_volume];
+    uint8_t current_volume = volume_to_gain(output_volume);
 
     if (mute[0]) {
       current_volume = 0;
@@ -558,11 +578,8 @@ void audio_task(void)
   // The encoder driver should - I believe - asynchronously gather a delta to be handled here
   if (tusb_time_millis_api() - start_ms >= volume_interval_ms)
   {
-    // This is just the raw delta from the encoder
-    int32_t volume_delta = get_volume_delta();
-
-    // Adjust the speed of volume control (number of volume steps per encoder turn)
-    volume_delta *= volume_speed;
+    // This is just the raw delta from the encoder, converted to 1/256 dB
+    int32_t volume_delta = get_volume_delta() * volume_step;
 
     // Long press triggers reset to bootloader
     handle_mute_button_held();
@@ -592,22 +609,26 @@ void audio_task(void)
       tud_task();
     }
 
-    int old_system_volume = system_volume;
+    int16_t old_output_volume = output_volume;
 
+    const int32_t new_output_volume = output_volume + volume_delta;
 
-    if(volume_delta + system_volume > 255) {
-        system_volume = 255;
-    } else if (volume_delta + system_volume < 0) {
-        system_volume = 0;
+    if(new_output_volume > VOLUME_MAX) {
+        output_volume = VOLUME_MAX;
+    } else if (new_output_volume < VOLUME_MIN) {
+        output_volume = VOLUME_MIN;
     } else {
-        system_volume += volume_delta;
+        output_volume = (int16_t)new_output_volume;
     }
 
-    if(system_volume != old_system_volume) {
-      led_blue = system_volume;
+    if(output_volume != old_output_volume) {
+      led_blue = volume_to_led(output_volume);
 
-      volume[0] = system_volume * 100;
-      volume[1] = system_volume * 100;
+      // Report the new setting on the master and both channels, so whichever
+      // the host reads back agrees with what we are applying
+      volume[0] = output_volume;
+      volume[1] = output_volume;
+      volume[2] = output_volume;
 
       // Volume has changed - notify the host with an interrupt
       // 6.1 Interrupt Data Message
