@@ -113,6 +113,20 @@ static uint8_t volume_to_gain(int16_t volume_db)
   return attenuation_gain[attenuation_db];
 }
 
+// The I2S path applies one gain to both channels, so the master and the per
+// channel settings collapse into the most attenuated of them. Hosts differ in
+// which they drive: Windows sets the logical channels and leaves the master at
+// unity, often setting only one of the two, while a host that only moves the
+// master leaves the channels at unity.
+static int16_t applied_volume(void)
+{
+  int16_t lowest = volume[0];
+  for (size_t i = 1; i < TU_ARRAY_SIZE(volume); i++) {
+    if (volume[i] < lowest) lowest = volume[i];
+  }
+  return lowest;
+}
+
 // Position within the advertised volume range, for the LED
 static uint8_t volume_to_led(int16_t volume_db)
 {
@@ -473,7 +487,7 @@ static bool audio20_feature_unit_set_request(uint8_t rhport, tusb_control_reques
       volume[channel] = requested;
     }
 
-    output_volume = requested;
+    output_volume = applied_volume();
 
     // Set the blue LED channel to indicate volume
     led_blue = volume_to_led(output_volume);
@@ -628,26 +642,25 @@ void audio_task(void)
       tud_task();
     }
 
-    int16_t old_output_volume = output_volume;
+    const int32_t target = output_volume + volume_delta;
+    int16_t requested;
 
-    const int32_t new_output_volume = output_volume + volume_delta;
-
-    if(new_output_volume > VOLUME_MAX) {
-        output_volume = VOLUME_MAX;
-    } else if (new_output_volume < VOLUME_MIN) {
-        output_volume = VOLUME_MIN;
+    if(target > VOLUME_MAX) {
+        requested = VOLUME_MAX;
+    } else if (target < VOLUME_MIN) {
+        requested = VOLUME_MIN;
     } else {
-        output_volume = (int16_t)new_output_volume;
+        requested = (int16_t)target;
     }
 
-    if(output_volume != old_output_volume) {
-      led_blue = volume_to_led(output_volume);
+    if(requested != output_volume) {
+      // The encoder is one control for both channels, so it moves the master
+      // and every channel together. Windows reads the logical channels back
+      // after the interrupt below, so leaving them stale would break the sync.
+      for (size_t i = 0; i < TU_ARRAY_SIZE(volume); i++) volume[i] = requested;
 
-      // Report the new setting on the master and both channels, so whichever
-      // the host reads back agrees with what we are applying
-      volume[0] = output_volume;
-      volume[1] = output_volume;
-      volume[2] = output_volume;
+      output_volume = applied_volume();
+      led_blue = volume_to_led(output_volume);
 
       // Volume has changed - notify the host with an interrupt
       // 6.1 Interrupt Data Message
