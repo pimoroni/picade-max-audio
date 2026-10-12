@@ -26,7 +26,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <string_view>
-#include <sys/param.h> // MIN and MAX
 
 #include "bsp/board_api.h"
 #include "tusb.h"
@@ -42,25 +41,17 @@
 #include "hardware/watchdog.h"
 #include "pico/timeout_helper.h"
 
-// Approximate exponential volume ramp - (n / 64) ^ 4
-// Tested with pure square for perceptual loudness.
-const uint8_t volume_ramp[] = {
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2,
-  2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4,
-  5, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 8, 8, 8, 9,
-  9, 9, 10, 10, 10, 11, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15,
-  16, 16, 17, 17, 18, 18, 19, 19, 20, 20, 21, 22, 22, 23, 24, 24,
-  25, 26, 27, 27, 28, 29, 30, 30, 31, 32, 33, 34, 35, 36, 37, 38,
-  39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 52, 53, 54, 55,
-  57, 58, 59, 61, 62, 63, 65, 66, 68, 69, 71, 72, 74, 76, 77, 79,
-  81, 82, 84, 86, 87, 89, 91, 93, 95, 97, 99, 101, 103, 105, 107, 109,
-  111, 113, 115, 118, 120, 122, 125, 127, 129, 132, 134, 137, 139, 142, 144, 147,
-  150, 152, 155, 158, 161, 163, 166, 169, 172, 175, 178, 181, 184, 188, 191, 194,
-  197, 201, 204, 207, 211, 214, 218, 221, 225, 229, 232, 236, 240, 244, 248, 255
+// Attenuation in whole dB to the linear gain applied by i2s_audio_give_buffer,
+// which multiplies each sample by gain / 256. An 8 bit gain bottoms out at
+// 1 / 256, so -48 dB is the quietest step below unity.
+// gain = round(256 * 10 ^ (-dB / 20)), clamped to 255.
+const uint8_t attenuation_gain[] = {
+  255, 228, 203, 181, 162, 144, 128, 114, 102, 91,  // -0 to -9 dB
+  81, 72, 64, 57, 51, 46, 41, 36, 32, 29,           // -10 to -19 dB
+  26, 23, 20, 18, 16, 14, 13, 11, 10, 9,            // -20 to -29 dB
+  8, 7, 6, 6, 5, 5, 4, 4, 3, 3,                     // -30 to -39 dB
+  3, 2, 2, 2, 2, 1, 1, 1, 1, 1,                     // -40 to -49 dB
+  1                                                 // -50 dB
 };
 
 //--------------------------------------------------------------------+
@@ -89,8 +80,16 @@ enum
 
 static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
 
-int system_volume = 255;
-int volume_speed = 10;
+// USB Audio Class volume is signed 1/256 dB, where 0 dB is unity gain and
+// negative values attenuate. Both the host and the encoder work in these units.
+const int16_t VOLUME_MIN = -VOLUME_CTRL_50_DB;
+const int16_t VOLUME_MAX = VOLUME_CTRL_0_DB;
+
+// dB per encoder detent
+const int16_t volume_step = 2 * 256;
+
+// Volume actually applied to the audio, set by the host or the encoder
+int16_t output_volume = VOLUME_MAX;
 
 uint8_t led_red = 0;
 uint8_t led_green = 0;
@@ -100,6 +99,41 @@ uint8_t led_blue = 0;
 // Current states
 int8_t mute[CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX + 1];       // +1 for master channel 0
 int16_t volume[CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX + 1];    // +1 for master channel 0
+
+// Convert a USB Audio Class volume into the linear gain the I2S path applies.
+// The minimum of the advertised range is silent, so a slider at the bottom is
+// silent rather than merely very quiet.
+static uint8_t volume_to_gain(int16_t volume_db)
+{
+  if (volume_db <= VOLUME_MIN) return 0;
+  if (volume_db >= VOLUME_MAX) return attenuation_gain[0];
+
+  // Round to the nearest whole dB of attenuation
+  const int attenuation_db = (VOLUME_MAX - volume_db + 128) / 256;
+  return attenuation_gain[attenuation_db];
+}
+
+// The I2S path applies one gain to both channels, so the master and the per
+// channel settings collapse into the most attenuated of them. Hosts differ in
+// which they drive: Windows sets the logical channels and leaves the master at
+// unity, often setting only one of the two, while a host that only moves the
+// master leaves the channels at unity.
+static int16_t applied_volume(void)
+{
+  int16_t lowest = volume[0];
+  for (size_t i = 1; i < TU_ARRAY_SIZE(volume); i++) {
+    if (volume[i] < lowest) lowest = volume[i];
+  }
+  return lowest;
+}
+
+// Position within the advertised volume range, for the LED
+static uint8_t volume_to_led(int16_t volume_db)
+{
+  if (volume_db <= VOLUME_MIN) return 0;
+  if (volume_db >= VOLUME_MAX) return 255;
+  return (uint8_t)(255 * (volume_db - VOLUME_MIN) / (VOLUME_MAX - VOLUME_MIN));
+}
 
 // Buffer for speaker data
 int32_t spk_buf[CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ / 4];
@@ -123,6 +157,11 @@ void led_task(void);
 void audio_task(void);
 void usb_serial_init(void);
 uint cdc_task(uint8_t *buf, size_t buf_len);
+
+// TinyUSB expects the application to supply a millisecond timebase when no RTOS is used
+extern "C" uint32_t tusb_time_millis_api(void) {
+  return to_ms_since_boot(get_absolute_time());
+}
 
 uint cdc_task(uint8_t *buf, size_t buf_len) {
 
@@ -203,6 +242,22 @@ void serial_task(void) {
 }
 
 /*------------- MAIN -------------*/
+void __isr __time_critical_func(audio_i2s_get_data_handler)() {
+  spk_data_size = tud_audio_read(spk_buf, sizeof(spk_buf));
+
+  if (spk_data_size)
+  {
+    uint8_t current_volume = volume_to_gain(output_volume);
+
+    if (mute[0]) {
+      current_volume = 0;
+    }
+
+    i2s_audio_give_buffer(spk_buf, (size_t)spk_data_size, current_resolution, current_volume);
+    spk_data_size = 0;
+  }
+}
+
 int main(void)
 {
 
@@ -215,12 +270,18 @@ int main(void)
   usb_serial_init();
 
   // init device stack on configured roothub port
-  tud_init(BOARD_TUD_RHPORT);
+  const tusb_rhport_init_t device_init = {
+    .role = TUSB_ROLE_DEVICE,
+    .speed = TUSB_SPEED_AUTO
+  };
+  tusb_init(BOARD_TUD_RHPORT, &device_init);
 
   i2s_audio_init();
   i2s_audio_start();
 
   TU_LOG1("Picade Max Audio Running\r\n");
+
+  irq_add_shared_handler(DMA_IRQ_0 + PICO_AUDIO_I2S_DMA_IRQ, audio_i2s_get_data_handler, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
 
   while (1)
   {
@@ -263,22 +324,24 @@ void tud_resume_cb(void)
 }
 
 // Helper for clock get requests
-static bool tud_audio_clock_get_request(uint8_t rhport, audio_control_request_t const *request)
+static bool audio20_clock_get_request(uint8_t rhport, tusb_control_request_t const *p_request)
 {
-  TU_ASSERT(request->bEntityID == UAC2_ENTITY_CLOCK);
+  uint8_t const ctrl_sel = TU_U16_HIGH(p_request->wValue);
 
-  if (request->bControlSelector == AUDIO_CS_CTRL_SAM_FREQ)
+  TU_ASSERT(TU_U16_HIGH(p_request->wIndex) == UAC2_ENTITY_CLOCK);
+
+  if (ctrl_sel == AUDIO20_CS_CTRL_SAM_FREQ)
   {
-    if (request->bRequest == AUDIO_CS_REQ_CUR)
+    if (p_request->bRequest == AUDIO20_CS_REQ_CUR)
     {
       TU_LOG1("Clock get current freq %" PRIu32 "\r\n", current_sample_rate);
 
-      audio_control_cur_4_t curf = { (int32_t) tu_htole32(current_sample_rate) };
-      return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &curf, sizeof(curf));
+      audio20_control_cur_4_t curf = { (int32_t) tu_htole32(current_sample_rate) };
+      return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &curf, sizeof(curf));
     }
-    else if (request->bRequest == AUDIO_CS_REQ_RANGE)
+    else if (p_request->bRequest == AUDIO20_CS_REQ_RANGE)
     {
-      audio_control_range_4_n_t(N_SAMPLE_RATES) rangef =
+      audio20_control_range_4_n_t(N_SAMPLE_RATES) rangef =
       {
         .wNumSubRanges = tu_htole16(N_SAMPLE_RATES)
       };
@@ -291,34 +354,36 @@ static bool tud_audio_clock_get_request(uint8_t rhport, audio_control_request_t 
         TU_LOG1("Range %d (%d, %d, %d)\r\n", i, (int)rangef.subrange[i].bMin, (int)rangef.subrange[i].bMax, (int)rangef.subrange[i].bRes);
       }
 
-      return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &rangef, sizeof(rangef));
+      return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &rangef, sizeof(rangef));
     }
   }
-  else if (request->bControlSelector == AUDIO_CS_CTRL_CLK_VALID &&
-           request->bRequest == AUDIO_CS_REQ_CUR)
+  else if (ctrl_sel == AUDIO20_CS_CTRL_CLK_VALID &&
+           p_request->bRequest == AUDIO20_CS_REQ_CUR)
   {
-    audio_control_cur_1_t cur_valid = { .bCur = 1 };
+    audio20_control_cur_1_t cur_valid = { .bCur = 1 };
     TU_LOG1("Clock get is valid %u\r\n", cur_valid.bCur);
-    return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &cur_valid, sizeof(cur_valid));
+    return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &cur_valid, sizeof(cur_valid));
   }
-  TU_LOG1("Clock get request not supported, entity = %u, selector = %u, request = %u\r\n",
-          request->bEntityID, request->bControlSelector, request->bRequest);
+  TU_LOG1("Clock get request not supported, selector = %u, request = %u\r\n",
+          ctrl_sel, p_request->bRequest);
   return false;
 }
 
 // Helper for clock set requests
-static bool tud_audio_clock_set_request(uint8_t rhport, audio_control_request_t const *request, uint8_t const *buf)
+static bool audio20_clock_set_request(uint8_t rhport, tusb_control_request_t const *p_request, uint8_t const *buf)
 {
   (void)rhport;
 
-  TU_ASSERT(request->bEntityID == UAC2_ENTITY_CLOCK);
-  TU_VERIFY(request->bRequest == AUDIO_CS_REQ_CUR);
+  uint8_t const ctrl_sel = TU_U16_HIGH(p_request->wValue);
 
-  if (request->bControlSelector == AUDIO_CS_CTRL_SAM_FREQ)
+  TU_ASSERT(TU_U16_HIGH(p_request->wIndex) == UAC2_ENTITY_CLOCK);
+  TU_VERIFY(p_request->bRequest == AUDIO20_CS_REQ_CUR);
+
+  if (ctrl_sel == AUDIO20_CS_CTRL_SAM_FREQ)
   {
-    TU_VERIFY(request->wLength == sizeof(audio_control_cur_4_t));
+    TU_VERIFY(p_request->wLength == sizeof(audio20_control_cur_4_t));
 
-    current_sample_rate = (uint32_t) ((audio_control_cur_4_t const *)buf)->bCur;
+    current_sample_rate = (uint32_t) ((audio20_control_cur_4_t const *)buf)->bCur;
 
     TU_LOG1("Clock set current freq: %" PRIu32 "\r\n", current_sample_rate);
 
@@ -326,88 +391,115 @@ static bool tud_audio_clock_set_request(uint8_t rhport, audio_control_request_t 
   }
   else
   {
-    TU_LOG1("Clock set request not supported, entity = %u, selector = %u, request = %u\r\n",
-            request->bEntityID, request->bControlSelector, request->bRequest);
+    TU_LOG1("Clock set request not supported, selector = %u, request = %u\r\n",
+            ctrl_sel, p_request->bRequest);
     return false;
   }
 }
 
 // Helper for feature unit get requests
-static bool tud_audio_feature_unit_get_request(uint8_t rhport, audio_control_request_t const *request)
+static bool audio20_feature_unit_get_request(uint8_t rhport, tusb_control_request_t const *p_request)
 {
-  TU_ASSERT(request->bEntityID == UAC2_ENTITY_SPK_FEATURE_UNIT);
+  uint8_t const ctrl_sel = TU_U16_HIGH(p_request->wValue);
+  uint8_t const channel_num = TU_U16_LOW(p_request->wValue);
 
-  if (request->bControlSelector == AUDIO_FU_CTRL_MUTE && request->bRequest == AUDIO_CS_REQ_CUR)
+  // A channel number beyond the master and the logical channels addresses them
+  // all at once, so report the master. Never index the arrays with it directly.
+  uint8_t const channel = channel_num < TU_ARRAY_SIZE(volume) ? channel_num : 0;
+
+  TU_ASSERT(TU_U16_HIGH(p_request->wIndex) == UAC2_ENTITY_SPK_FEATURE_UNIT);
+
+  if (ctrl_sel == AUDIO20_FU_CTRL_MUTE && p_request->bRequest == AUDIO20_CS_REQ_CUR)
   {
-    audio_control_cur_1_t mute1 = { .bCur = mute[request->bChannelNumber] };
-    TU_LOG1("Get channel %u mute %d\r\n", request->bChannelNumber, mute1.bCur);
-    return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &mute1, sizeof(mute1));
+    audio20_control_cur_1_t mute1 = { .bCur = mute[channel] };
+    TU_LOG1("Get channel %u mute %d\r\n", channel_num, mute1.bCur);
+    return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &mute1, sizeof(mute1));
   }
-  else if (request->bControlSelector == AUDIO_FU_CTRL_VOLUME)
+  else if (ctrl_sel == AUDIO20_FU_CTRL_VOLUME)
   {
-    if (request->bRequest == AUDIO_CS_REQ_RANGE)
+    if (p_request->bRequest == AUDIO20_CS_REQ_RANGE)
     {
-      audio_control_range_2_n_t(1) range_vol;
+      audio20_control_range_2_n_t(1) range_vol;
       range_vol.wNumSubRanges = tu_htole16(1);
-      range_vol.subrange[0] = { .bMin = tu_htole16(VOLUME_CTRL_0_DB), tu_htole16(VOLUME_CTRL_100_DB), tu_htole16(256) };
-      TU_LOG1("Get channel %u volume range (%d, %d, %u) dB\r\n", request->bChannelNumber,
+      range_vol.subrange[0] = { .bMin = tu_htole16(VOLUME_MIN), tu_htole16(VOLUME_MAX), tu_htole16(256) };
+      TU_LOG1("Get channel %u volume range (%d, %d, %u) dB\r\n", channel_num,
               range_vol.subrange[0].bMin / 256, range_vol.subrange[0].bMax / 256, range_vol.subrange[0].bRes / 256);
-      return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &range_vol, sizeof(range_vol));
+      return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &range_vol, sizeof(range_vol));
     }
-    else if (request->bRequest == AUDIO_CS_REQ_CUR)
+    else if (p_request->bRequest == AUDIO20_CS_REQ_CUR)
     {
-      audio_control_cur_2_t cur_vol = { .bCur = tu_htole16(volume[request->bChannelNumber]) };
-      TU_LOG1("Get channel %u volume %d dB\r\n", request->bChannelNumber, cur_vol.bCur / 256);
-      return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &cur_vol, sizeof(cur_vol));
+      audio20_control_cur_2_t cur_vol = { .bCur = tu_htole16(volume[channel]) };
+      TU_LOG1("Get channel %u volume %d dB\r\n", channel_num, cur_vol.bCur / 256);
+      return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &cur_vol, sizeof(cur_vol));
     }
   }
-  TU_LOG1("Feature unit get request not supported, entity = %u, selector = %u, request = %u\r\n",
-          request->bEntityID, request->bControlSelector, request->bRequest);
+  TU_LOG1("Feature unit get request not supported, selector = %u, request = %u\r\n",
+          ctrl_sel, p_request->bRequest);
 
   return false;
 }
 
 // Helper for feature unit set requests
 // This handles volume control and mute requests coming from the USB host to Picade Max Audio
-static bool tud_audio_feature_unit_set_request(uint8_t rhport, audio_control_request_t const *request, uint8_t const *buf)
+static bool audio20_feature_unit_set_request(uint8_t rhport, tusb_control_request_t const *p_request, uint8_t const *buf)
 {
   (void)rhport;
 
-  TU_ASSERT(request->bEntityID == UAC2_ENTITY_SPK_FEATURE_UNIT);
-  TU_VERIFY(request->bRequest == AUDIO_CS_REQ_CUR);
+  uint8_t const ctrl_sel = TU_U16_HIGH(p_request->wValue);
+  uint8_t const channel_num = TU_U16_LOW(p_request->wValue);
 
-  if (request->bControlSelector == AUDIO_FU_CTRL_MUTE)
+  // A channel number beyond the master and the logical channels addresses them
+  // all at once. Never index the arrays with it directly.
+  bool const all_channels = channel_num >= TU_ARRAY_SIZE(volume);
+  uint8_t const channel = all_channels ? 0 : channel_num;
+
+  TU_ASSERT(TU_U16_HIGH(p_request->wIndex) == UAC2_ENTITY_SPK_FEATURE_UNIT);
+  TU_VERIFY(p_request->bRequest == AUDIO20_CS_REQ_CUR);
+
+  if (ctrl_sel == AUDIO20_FU_CTRL_MUTE)
   {
-    TU_VERIFY(request->wLength == sizeof(audio_control_cur_1_t));
+    TU_VERIFY(p_request->wLength == sizeof(audio20_control_cur_1_t));
 
-    mute[request->bChannelNumber] = ((audio_control_cur_1_t const *)buf)->bCur;
+    int8_t const requested = ((audio20_control_cur_1_t const *)buf)->bCur;
 
-    TU_LOG1("Set channel %d Mute: %d\r\n", request->bChannelNumber, mute[request->bChannelNumber]);
+    if (all_channels) {
+      for (size_t i = 0; i < TU_ARRAY_SIZE(mute); i++) mute[i] = requested;
+    } else {
+      mute[channel] = requested;
+    }
+
+    TU_LOG1("Set channel %d Mute: %d\r\n", channel_num, requested);
 
     // Set the red LED channel to indicate mute
-    led_red = mute[request->bChannelNumber] ? 255 : 0;
-  
+    led_red = mute[0] ? 255 : 0;
+
     return true;
   }
-  else if (request->bControlSelector == AUDIO_FU_CTRL_VOLUME)
+  else if (ctrl_sel == AUDIO20_FU_CTRL_VOLUME)
   {
-    TU_VERIFY(request->wLength == sizeof(audio_control_cur_2_t));
+    TU_VERIFY(p_request->wLength == sizeof(audio20_control_cur_2_t));
 
-    volume[request->bChannelNumber] = tu_le16toh(((audio_control_cur_2_t const *)buf)->bCur);
+    int16_t const requested = tu_le16toh(((audio20_control_cur_2_t const *)buf)->bCur);
+
+    if (all_channels) {
+      for (size_t i = 0; i < TU_ARRAY_SIZE(volume); i++) volume[i] = requested;
+    } else {
+      volume[channel] = requested;
+    }
+
+    output_volume = applied_volume();
 
     // Set the blue LED channel to indicate volume
-    led_blue = MIN(255, volume[request->bChannelNumber] / 100);
+    led_blue = volume_to_led(output_volume);
 
-    system_volume = MIN(255u, volume[request->bChannelNumber] / 100);
-
-    TU_LOG1("Set channel %d volume: %d dB\r\n", request->bChannelNumber, volume[request->bChannelNumber] / 256);
+    TU_LOG1("Set channel %d volume: %d dB\r\n", channel_num, requested / 256);
 
     return true;
   }
   else
   {
-    TU_LOG1("Feature unit set request not supported, entity = %u, selector = %u, request = %u\r\n",
-            request->bEntityID, request->bControlSelector, request->bRequest);
+    TU_LOG1("Feature unit set request not supported, selector = %u, request = %u\r\n",
+            ctrl_sel, p_request->bRequest);
     return false;
   }
 }
@@ -416,19 +508,30 @@ static bool tud_audio_feature_unit_set_request(uint8_t rhport, audio_control_req
 // Application Callback API Implementations
 //--------------------------------------------------------------------+
 
+bool tud_audio_set_req_ep_cb(uint8_t rhport, tusb_control_request_t const *p_request, uint8_t *pBuff) {
+  (void) rhport;
+  (void) pBuff;
+  return false;
+}
+
+bool tud_audio_get_req_ep_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
+  (void) rhport;
+  return false;
+}
+
 // Invoked when audio class specific get request received for an entity
 bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request)
 {
-  audio_control_request_t const *request = (audio_control_request_t const *)p_request;
+  uint8_t const entity_id = TU_U16_HIGH(p_request->wIndex);
 
-  if (request->bEntityID == UAC2_ENTITY_CLOCK)
-    return tud_audio_clock_get_request(rhport, request);
-  if (request->bEntityID == UAC2_ENTITY_SPK_FEATURE_UNIT)
-    return tud_audio_feature_unit_get_request(rhport, request);
+  if (entity_id == UAC2_ENTITY_CLOCK)
+    return audio20_clock_get_request(rhport, p_request);
+  if (entity_id == UAC2_ENTITY_SPK_FEATURE_UNIT)
+    return audio20_feature_unit_get_request(rhport, p_request);
   else
   {
     TU_LOG1("Get request not handled, entity = %d, selector = %d, request = %d\r\n",
-            request->bEntityID, request->bControlSelector, request->bRequest);
+            entity_id, TU_U16_HIGH(p_request->wValue), p_request->bRequest);
   }
   return false;
 }
@@ -436,19 +539,19 @@ bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p
 // Invoked when audio class specific set request received for an entity
 bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request, uint8_t *buf)
 {
-  audio_control_request_t const *request = (audio_control_request_t const *)p_request;
+  uint8_t const entity_id = TU_U16_HIGH(p_request->wIndex);
 
-  if (request->bEntityID == UAC2_ENTITY_SPK_FEATURE_UNIT)
-    return tud_audio_feature_unit_set_request(rhport, request, buf);
-  if (request->bEntityID == UAC2_ENTITY_CLOCK)
-    return tud_audio_clock_set_request(rhport, request, buf);
+  if (entity_id == UAC2_ENTITY_SPK_FEATURE_UNIT)
+    return audio20_feature_unit_set_request(rhport, p_request, buf);
+  if (entity_id == UAC2_ENTITY_CLOCK)
+    return audio20_clock_set_request(rhport, p_request, buf);
   TU_LOG1("Set request not handled, entity = %d, selector = %d, request = %d\r\n",
-          request->bEntityID, request->bControlSelector, request->bRequest);
+          entity_id, TU_U16_HIGH(p_request->wValue), p_request->bRequest);
 
   return false;
 }
 
-bool tud_audio_set_itf_close_EP_cb(uint8_t rhport, tusb_control_request_t const * p_request)
+bool tud_audio_set_itf_close_ep_cb(uint8_t rhport, tusb_control_request_t const * p_request)
 {
   (void)rhport;
 
@@ -475,31 +578,9 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const * p_reque
   spk_data_size = 0;
   if(alt != 0)
   {
-    current_resolution = resolutions_per_format[alt-1];
+    current_resolution = resolutions_per_format[alt - 1];
   }
 
-  return true;
-}
-
-bool tud_audio_rx_done_pre_read_cb(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting)
-{
-  (void)rhport;
-  (void)func_id;
-  (void)ep_out;
-  (void)cur_alt_setting;
-
-  spk_data_size = tud_audio_read(spk_buf, n_bytes_received);
-  return true;
-}
-
-bool tud_audio_tx_done_pre_load_cb(uint8_t rhport, uint8_t itf, uint8_t ep_in, uint8_t cur_alt_setting)
-{
-  (void)rhport;
-  (void)itf;
-  (void)ep_in;
-  (void)cur_alt_setting;
-
-  // This callback could be used to fill microphone data separately
   return true;
 }
 
@@ -512,10 +593,11 @@ void audio_task(void)
   static uint32_t start_ms = 0;
   uint32_t volume_interval_ms = 50;
 
+  /*spk_data_size = tud_audio_read(spk_buf, sizeof(spk_buf));
+
   if (spk_data_size)
   {
-    // "Hardware" volume is 0 - 100 in steps of 256, with a maximum value of 25600
-    int current_volume = volume_ramp[system_volume];
+    uint8_t current_volume = volume_to_gain(output_volume);
 
     if (mute[0]) {
       current_volume = 0;
@@ -523,17 +605,14 @@ void audio_task(void)
 
     i2s_audio_give_buffer(spk_buf, (size_t)spk_data_size, current_resolution, current_volume);
     spk_data_size = 0;
-  }
+  }*/
 
   // Only handle volume control changes every volume_interval_ms
   // The encoder driver should - I believe - asynchronously gather a delta to be handled here
-  if (board_millis() - start_ms >= volume_interval_ms)
+  if (tusb_time_millis_api() - start_ms >= volume_interval_ms)
   {
-    // This is just the raw delta from the encoder
-    int32_t volume_delta = get_volume_delta();
-
-    // Adjust the speed of volume control (number of volume steps per encoder turn)
-    volume_delta *= volume_speed;
+    // This is just the raw delta from the encoder, converted to 1/256 dB
+    int32_t volume_delta = get_volume_delta() * volume_step;
 
     // Long press triggers reset to bootloader
     handle_mute_button_held();
@@ -549,47 +628,50 @@ void audio_task(void)
 
       // Mute was changed - notify the host with an interrupt
       // 6.1 Interrupt Data Message
-      const audio_interrupt_data_t data = {
+      const audio_interrupt_data_t data = {.v2 = {
         .bInfo = 0,                                       // Class-specific interrupt, originated from an interface
-        .bAttribute = AUDIO_CS_REQ_CUR,                   // Caused by current settings
+        .bAttribute = AUDIO20_CS_REQ_CUR,                   // Caused by current settings
         .wValue_cn_or_mcn = 0,                            // CH0: master volume
-        .wValue_cs = AUDIO_FU_CTRL_MUTE,                  // Muted/Unmuted
+        .wValue_cs = AUDIO20_FU_CTRL_MUTE,                  // Muted/Unmuted
         .wIndex_ep_or_int = 0,                            // From the interface itself
         .wIndex_entity_id = UAC2_ENTITY_SPK_FEATURE_UNIT, // From feature unit
-      };
+      }};
 
       tud_audio_int_write(&data);
       // Call tud_task to handle the interrupt to host
       tud_task();
     }
 
-    int old_system_volume = system_volume;
+    const int32_t target = output_volume + volume_delta;
+    int16_t requested;
 
-
-    if(volume_delta + system_volume > 255) {
-        system_volume = 255;
-    } else if (volume_delta + system_volume < 0) {
-        system_volume = 0;
+    if(target > VOLUME_MAX) {
+        requested = VOLUME_MAX;
+    } else if (target < VOLUME_MIN) {
+        requested = VOLUME_MIN;
     } else {
-        system_volume += volume_delta;
+        requested = (int16_t)target;
     }
 
-    if(system_volume != old_system_volume) {
-      led_blue = system_volume;
+    if(requested != output_volume) {
+      // The encoder is one control for both channels, so it moves the master
+      // and every channel together. Windows reads the logical channels back
+      // after the interrupt below, so leaving them stale would break the sync.
+      for (size_t i = 0; i < TU_ARRAY_SIZE(volume); i++) volume[i] = requested;
 
-      volume[0] = system_volume * 100;
-      volume[1] = system_volume * 100;
+      output_volume = applied_volume();
+      led_blue = volume_to_led(output_volume);
 
       // Volume has changed - notify the host with an interrupt
       // 6.1 Interrupt Data Message
-      const audio_interrupt_data_t data = {
+      const audio_interrupt_data_t data = {.v2 = {
         .bInfo = 0,                                       // Class-specific interrupt, originated from an interface
-        .bAttribute = AUDIO_CS_REQ_CUR,                   // Caused by current settings
+        .bAttribute = AUDIO20_CS_REQ_CUR,                   // Caused by current settings
         .wValue_cn_or_mcn = 0,                            // CH0: master volume
-        .wValue_cs = AUDIO_FU_CTRL_VOLUME,                // Volume change
+        .wValue_cs = AUDIO20_FU_CTRL_VOLUME,                // Volume change
         .wIndex_ep_or_int = 0,                            // From the interface itself
         .wIndex_entity_id = UAC2_ENTITY_SPK_FEATURE_UNIT, // From feature unit
-      };
+      }};
 
       tud_audio_int_write(&data);
       // Call tud_task to handle the interrupt to host
@@ -609,7 +691,7 @@ void led_task(void)
   static bool led_state = false;
 
   // Blink every interval ms
-  if (board_millis() - start_ms >= blink_interval_ms) {
+  if (tusb_time_millis_api() - start_ms >= blink_interval_ms) {
     start_ms += blink_interval_ms;
 
     led_green = led_state ? 64 : 0;

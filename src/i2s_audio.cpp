@@ -31,7 +31,7 @@ void i2s_audio_init() {
     // We need to make sure to claim an unused channel,
     // but then audio_i2s_setup tries to claim it again...
     // So claim & unclaim it, effectively checking it's unused.
-    uint dma_channel = dma_claim_unused_channel(true);
+    uint8_t dma_channel = (uint8_t)dma_claim_unused_channel(true);
     dma_channel_unclaim(dma_channel);
 
     producer_pool = audio_new_producer_pool(&producer_format, 3, CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ / sizeof(int16_t)); // todo correct size

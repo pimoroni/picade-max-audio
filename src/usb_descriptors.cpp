@@ -73,9 +73,8 @@ void usb_serial_init(void) {
 //--------------------------------------------------------------------+
 // Configuration Descriptor
 //--------------------------------------------------------------------+
-#define CONFIG_TOTAL_LEN    	(TUD_CONFIG_DESC_LEN + CFG_TUD_AUDIO * TUD_AUDIO_HEADSET_STEREO_DESC_LEN + CFG_TUD_CDC * TUD_CDC_DESC_LEN)
+#define CONFIG_TOTAL_LEN    	(TUD_CONFIG_DESC_LEN + CFG_TUD_AUDIO * TUD_AUDIO20_HEADSET_STEREO_DESC_LEN + CFG_TUD_CDC * TUD_CDC_DESC_LEN)
 
-#define EPNUM_AUDIO_IN    0x01
 #define EPNUM_AUDIO_OUT   0x01
 #define EPNUM_AUDIO_INT   0x02
 
@@ -84,13 +83,23 @@ void usb_serial_init(void) {
 #define EPNUM_CDC_IN      0x84
 
 
+enum STRING {
+  STR_LANGUAGE = 0x00,
+  STR_MANUFACTURER,
+  STR_PRODUCT,
+  STR_SERIAL,
+  STR_AUDIO_INTERFACE,
+  STR_CDC_SERIAL_INTERFACE
+};
+
+
 uint8_t const desc_configuration[] =
 {
     // Config number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 100),
 
     // Interface number, string index, EP Out & EP In address, EP size
-    TUD_AUDIO_HEADSET_STEREO_DESCRIPTOR(2, EPNUM_AUDIO_OUT, EPNUM_AUDIO_IN | 0x80, EPNUM_AUDIO_INT | 0x80),
+    TUD_AUDIO20_SPEAKER_STEREO_DESCRIPTOR(STR_AUDIO_INTERFACE, EPNUM_AUDIO_OUT, EPNUM_AUDIO_INT | 0x80),
 
     // CDC: Interface number, string index, EP notification address and size, EP data address (out, in) and size.
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 5, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64)
